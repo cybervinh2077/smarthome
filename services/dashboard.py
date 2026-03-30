@@ -63,9 +63,15 @@ class JetsonAIDashboard:
         else:
             print(f"[MQTT] Connect failed, rc={rc}")
 
+    def publish_ir_status(self, status: str):
+        self.client.publish(f"{ROOM_TOPIC}/ir/status", status)
+        print(f"[IR STATUS] → {status}")
+
     def _on_message(self, client, userdata, msg):
-        topic   = msg.topic
-        payload = msg.payload.decode().strip()
+        topic             = msg.topic
+        payload           = msg.payload.decode().strip()
+        status_to_publish = None
+
         with self.lock:
             try:
                 if "temp" in topic:
@@ -81,11 +87,17 @@ class JetsonAIDashboard:
                     if self.ir_setup_mode == "waiting_on":
                         self.ir_on_code    = payload
                         self.ir_setup_mode = "waiting_off"
+                        status_to_publish  = "waiting_off"
                     elif self.ir_setup_mode == "waiting_off":
                         self.ir_off_code   = payload
                         self.ir_setup_mode = None
+                        status_to_publish  = "done"
             except ValueError:
                 pass
+
+        # Publish NGOÀI lock — paho không được gọi bên trong threading.Lock
+        if status_to_publish:
+            self.publish_ir_status(status_to_publish)
 
     # ── AI ───────────────────────────────────────────────────────────────────
     def ai_query(self, user_query: str) -> str:
@@ -324,6 +336,7 @@ class JetsonAIDashboard:
                     self.ir_off_code   = None
                     self.ir_setup_mode = "waiting_on"
                 self.client.publish(f"{ROOM_TOPIC}/ir/listen", "1")
+                self.publish_ir_status("waiting_on")
                 ai_reply = "[IR SETUP] Bắt đầu học remote. Bấm nút ON..."
             elif key == ord('o'):
                 with self.lock:
