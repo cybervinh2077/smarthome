@@ -19,6 +19,14 @@ MQTT_PORT   = 1883
 ROOM_TOPIC  = "home/room1"
 LLM_MODEL   = "phi3:mini"
 
+# ── IR Topics ─────────────────────────────────────────────────────────────────
+TOPIC_IR_LEARN_ON  = f"{ROOM_TOPIC}/ir/learn_on"
+TOPIC_IR_LEARN_OFF = f"{ROOM_TOPIC}/ir/learn_off"
+TOPIC_IR_SEND_ON   = f"{ROOM_TOPIC}/ir/send_on"
+TOPIC_IR_SEND_OFF  = f"{ROOM_TOPIC}/ir/send_off"
+TOPIC_IR_ACK       = f"{ROOM_TOPIC}/ir/ack"
+TOPIC_IR_RX        = f"{ROOM_TOPIC}/ir/received"
+
 SYSTEM_PROMPT = """Bạn là trợ lý AI nhà thông minh. Nhiệm vụ:
 1. Trả lời câu hỏi về cảm biến phòng ngắn gọn bằng tiếng Việt.
 2. Tư vấn bật/tắt điều hòa theo rule:
@@ -59,7 +67,8 @@ class JetsonAIDashboard:
         if rc == 0:
             client.subscribe(f"{ROOM_TOPIC}/sensor/+")
             client.subscribe(f"{ROOM_TOPIC}/ac/status")
-            client.subscribe(f"{ROOM_TOPIC}/ir/received")
+            client.subscribe(TOPIC_IR_RX)
+            client.subscribe(TOPIC_IR_ACK)
         else:
             print(f"[MQTT] Connect failed, rc={rc}")
 
@@ -82,7 +91,7 @@ class JetsonAIDashboard:
                     self.motion = "ON" if payload == "1" else "OFF"
                 elif "ac/status" in topic:
                     self.ac_status = payload.upper()
-                elif "ir/received" in topic:
+                elif topic == TOPIC_IR_RX:
                     self.last_ir = payload
                     if self.ir_setup_mode == "waiting_on":
                         self.ir_on_code    = payload
@@ -92,10 +101,31 @@ class JetsonAIDashboard:
                         self.ir_off_code   = payload
                         self.ir_setup_mode = None
                         status_to_publish  = "done"
+                elif topic == TOPIC_IR_ACK:
+                    pass  # xử lý ngoài lock bên dưới
             except ValueError:
                 pass
 
-        # Publish NGOÀI lock — paho không được gọi bên trong threading.Lock
+        # Xử lý ir/ack và publish NGOÀI lock
+        if topic == TOPIC_IR_ACK:
+            ack_map = {
+                "learning_on":      "[IR] Đang chờ học mã BẬT... bấm remote vào IR RX",
+                "learning_off":     "[IR] Đang chờ học mã TẮT... bấm remote vào IR RX",
+                "learned_on":       "✅ Đã học xong mã BẬT điều hòa!",
+                "learned_off":      "✅ Đã học xong mã TẮT điều hòa!",
+                "sent_on":          "✅ Đã gửi lệnh BẬT điều hòa!",
+                "sent_off":         "✅ Đã gửi lệnh TẮT điều hòa!",
+                "error_no_raw_on":  "❌ Chưa học mã BẬT! Vào Setup IR trước.",
+                "error_no_raw_off": "❌ Chưa học mã TẮT! Vào Setup IR trước.",
+            }
+            print(ack_map.get(payload, f"[IR ACK] {payload}"))
+            # Khi ESP32 xác nhận đã học ON xong → tự động chuyển sang học OFF
+            if payload == "learned_on":
+                with self.lock:
+                    self.ir_setup_mode = "waiting_off"
+                self.client.publish(TOPIC_IR_LEARN_OFF, "1")
+                print("[IR Setup] Gửi lệnh học mã TẮT...")
+
         if status_to_publish:
             self.publish_ir_status(status_to_publish)
 
@@ -335,31 +365,22 @@ class JetsonAIDashboard:
                     self.ir_on_code    = None
                     self.ir_off_code   = None
                     self.ir_setup_mode = "waiting_on"
-                self.client.publish(f"{ROOM_TOPIC}/ir/listen", "1")
+                self.client.publish(TOPIC_IR_LEARN_ON, "1")
+                print("[IR Setup] Gửi lệnh học mã BẬT...")
                 self.publish_ir_status("waiting_on")
                 ai_reply = "[IR SETUP] Bắt đầu học remote. Bấm nút ON..."
             elif key == ord('o'):
-                with self.lock:
-                    code = self.ir_on_code
-                if code:
-                    self.client.publish(f"{ROOM_TOPIC}/ir/send", code)
-                    ai_reply = f"[IR ON SENT] {code} → ESP32"
-                else:
-                    ai_reply = "[IR] Chưa có mã ON. Nhấn [r] để setup."
+                self.client.publish(TOPIC_IR_SEND_ON, "1")
+                ai_reply = "[IR ON] Đã gửi lệnh BẬT → ESP32"
             elif key == ord('f'):
-                with self.lock:
-                    code = self.ir_off_code
-                if code:
-                    self.client.publish(f"{ROOM_TOPIC}/ir/send", code)
-                    ai_reply = f"[IR OFF SENT] {code} → ESP32"
-                else:
-                    ai_reply = "[IR] Chưa có mã OFF. Nhấn [r] để setup."
+                self.client.publish(TOPIC_IR_SEND_OFF, "1")
+                ai_reply = "[IR OFF] Đã gửi lệnh TẮT → ESP32"
             elif key == ord('s'):
                 stdscr.nodelay(False)
                 code = self._input_ir_code(stdscr)
                 stdscr.nodelay(True)
                 if code:
-                    self.client.publish(f"{ROOM_TOPIC}/ir/send", code)
+                    self.client.publish(TOPIC_IR_SEND_ON, code)
                     ai_reply = f"[IR SENT] {code} → ESP32"
 
     # ── Entry ─────────────────────────────────────────────────────────────────
