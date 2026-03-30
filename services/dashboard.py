@@ -55,7 +55,7 @@ class JetsonAIDashboard:
         self.client = mqtt.Client(client_id="JetsonDashboard", clean_session=True)
 
     # ── MQTT ─────────────────────────────────────────────────────────────────
-    def _on_connect(self, client, userdata, flags, rc, properties=None):
+    def _on_connect(self, client, userdata, flags, rc, *args):
         if rc == 0:
             client.subscribe(f"{ROOM_TOPIC}/sensor/+")
             client.subscribe(f"{ROOM_TOPIC}/ac/status")
@@ -135,7 +135,7 @@ class JetsonAIDashboard:
 
         H, W = stdscr.getmaxyx()
 
-        def safe(row, col, text, attr=0):
+        def safe(row, col, text, attr=curses.A_NORMAL):
             if row < H - 1 and col < W - 1:
                 try:
                     stdscr.addstr(row, col, text[:W - col - 1], attr)
@@ -260,12 +260,19 @@ class JetsonAIDashboard:
         """Hiển thị prompt nhập hex IR code, trả về string nhập vào."""
         H, W = stdscr.getmaxyx()
         prompt = "Nhập mã IR hex (vd: 0x20DF10EF): "
-        stdscr.addstr(H - 2, 0, " " * (W - 1))
-        stdscr.addstr(H - 2, 2, prompt)
+        row = H - 2
+        try:
+            stdscr.addstr(row, 0, " " * (W - 1))
+            stdscr.addstr(row, 2, prompt[:W - 3])
+        except curses.error:
+            pass
         stdscr.refresh()
         curses.echo()
         curses.curs_set(1)
-        code = stdscr.getstr(H - 2, 2 + len(prompt), 20).decode().strip()
+        try:
+            code = stdscr.getstr(row, 2 + len(prompt), 20).decode().strip()
+        except Exception:
+            code = ""
         curses.noecho()
         curses.curs_set(0)
         return code
