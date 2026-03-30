@@ -50,7 +50,7 @@ class JetsonAIDashboard:
         self.ir_setup_mode  = None        # "waiting_on" | "waiting_off" | None
         self.lock           = threading.Lock()
 
-        self.client = mqtt.Client()
+        self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         self.client.on_connect = self._on_connect
         self.client.on_message = self._on_message
 
@@ -128,40 +128,47 @@ class JetsonAIDashboard:
 
         H, W = stdscr.getmaxyx()
 
+        def safe(row, col, text, attr=0):
+            if row < H - 1 and col < W - 1:
+                try:
+                    stdscr.addstr(row, col, text[:W - col - 1], attr)
+                except curses.error:
+                    pass
+
         # Header
         stdscr.attron(curses.color_pair(1) | curses.A_BOLD)
-        stdscr.addstr(0, 0, "=" * (W - 1))
-        stdscr.addstr(1, 2, f"JETSON NANO AI DASHBOARD  |  {LLM_MODEL}  |  {datetime.now().strftime('%H:%M:%S')}")
-        stdscr.addstr(2, 0, "=" * (W - 1))
+        safe(0, 0, "=" * (W - 1))
+        safe(1, 2, f"JETSON NANO AI DASHBOARD  |  {LLM_MODEL}  |  {datetime.now().strftime('%H:%M:%S')}")
+        safe(2, 0, "=" * (W - 1))
         stdscr.attroff(curses.color_pair(1) | curses.A_BOLD)
 
         # Sensor data
         stdscr.attron(curses.color_pair(2))
-        stdscr.addstr(4, 2, "[ SENSOR DATA ]")
+        safe(4, 2, "[ SENSOR DATA ]")
         stdscr.attroff(curses.color_pair(2))
 
         with self.lock:
             t, h, m, ac = self.temp, self.hum, self.motion, self.ac_status
 
-        stdscr.addstr(5, 4, f"Temperature : {t:.1f} C")
-        stdscr.addstr(6, 4, f"Humidity    : {h:.0f} %")
+        safe(5, 4, f"Temperature : {t:.1f} C")
+        safe(6, 4, f"Humidity    : {h:.0f} %")
 
         stdscr.attron(curses.color_pair(5) if m == "ON" else curses.color_pair(1))
-        stdscr.addstr(7, 4, f"Motion      : {m}")
+        safe(7, 4, f"Motion      : {m}")
         stdscr.attroff(curses.color_pair(5) if m == "ON" else curses.color_pair(1))
 
         stdscr.attron(curses.color_pair(2) if ac == "ON" else curses.color_pair(3))
-        stdscr.addstr(8, 4, f"AC Status   : {ac}")
+        safe(8, 4, f"AC Status   : {ac}")
         stdscr.attroff(curses.color_pair(2) if ac == "ON" else curses.color_pair(3))
 
         stdscr.attron(curses.color_pair(3))
-        stdscr.addstr(9, 4, f"IR RX       : {self.last_ir}")
+        safe(9, 4, f"IR RX       : {self.last_ir}")
         stdscr.attroff(curses.color_pair(3))
 
         # IR Setup section
-        stdscr.addstr(11, 0, "-" * (W - 1))
+        safe(11, 0, "-" * (W - 1))
         stdscr.attron(curses.color_pair(2) | curses.A_BOLD)
-        stdscr.addstr(12, 2, "[ IR SETUP ]")
+        safe(12, 2, "[ IR SETUP ]")
         stdscr.attroff(curses.color_pair(2) | curses.A_BOLD)
 
         with self.lock:
@@ -172,46 +179,46 @@ class JetsonAIDashboard:
         # ON Code
         if ir_on:
             stdscr.attron(curses.color_pair(1))
-            stdscr.addstr(13, 4, f"ON Code  : {ir_on} (đã học)")
+            safe(13, 4, f"ON Code  : {ir_on} (đã học)")
             stdscr.attroff(curses.color_pair(1))
         else:
             stdscr.attron(curses.color_pair(3))
-            stdscr.addstr(13, 4, "ON Code  : Chưa học")
+            safe(13, 4, "ON Code  : Chưa học")
             stdscr.attroff(curses.color_pair(3))
 
         # OFF Code
         if ir_off:
             stdscr.attron(curses.color_pair(1))
-            stdscr.addstr(14, 4, f"OFF Code : {ir_off} (đã học)")
+            safe(14, 4, f"OFF Code : {ir_off} (đã học)")
             stdscr.attroff(curses.color_pair(1))
         else:
             stdscr.attron(curses.color_pair(5))
-            stdscr.addstr(14, 4, "OFF Code : Chưa học")
+            safe(14, 4, "OFF Code : Chưa học")
             stdscr.attroff(curses.color_pair(5))
 
-        # Mode status (nhấp nháy khi đang chờ)
+        # Mode status
         blink = int(time.time()) % 2 == 0
         if ir_mode == "waiting_on":
             mode_str = "Hãy bấm nút ON trên remote..." if blink else ">>> CHỜ MÃ ON <<<   "
             stdscr.attron(curses.color_pair(2) | curses.A_BOLD)
-            stdscr.addstr(15, 4, f"Mode     : {mode_str}")
+            safe(15, 4, f"Mode     : {mode_str}")
             stdscr.attroff(curses.color_pair(2) | curses.A_BOLD)
         elif ir_mode == "waiting_off":
             mode_str = "ON đã lưu! Hãy bấm nút OFF trên remote..." if blink else ">>> CHỜ MÃ OFF <<<  "
             stdscr.attron(curses.color_pair(2) | curses.A_BOLD)
-            stdscr.addstr(15, 4, f"Mode     : {mode_str}")
+            safe(15, 4, f"Mode     : {mode_str}")
             stdscr.attroff(curses.color_pair(2) | curses.A_BOLD)
         elif ir_on and ir_off:
             stdscr.attron(curses.color_pair(1))
-            stdscr.addstr(15, 4, f"Mode     : Setup hoàn tất!")
+            safe(15, 4, "Mode     : Setup hoàn tất!")
             stdscr.attroff(curses.color_pair(1))
         else:
-            stdscr.addstr(15, 4, "Mode     : Nhấn [r] để setup remote")
+            safe(15, 4, "Mode     : Nhấn [r] để setup remote")
 
         # AI response
-        stdscr.addstr(17, 0, "-" * (W - 1))
+        safe(17, 0, "-" * (W - 1))
         stdscr.attron(curses.color_pair(4) | curses.A_BOLD)
-        stdscr.addstr(18, 2, "[ AI RESPONSE ]")
+        safe(18, 2, "[ AI RESPONSE ]")
         stdscr.attroff(curses.color_pair(4) | curses.A_BOLD)
 
         max_len = W - 6
@@ -222,12 +229,12 @@ class JetsonAIDashboard:
                 chunk = chunk[max_len:]
             lines.append(chunk)
         for i, line in enumerate(lines[:6]):
-            stdscr.addstr(19 + i, 4, line[:W - 5])
+            safe(19 + i, 4, line)
 
         # Commands
-        stdscr.addstr(26, 0, "-" * (W - 1))
+        safe(26, 0, "-" * (W - 1))
         stdscr.attron(curses.color_pair(3) | curses.A_BOLD)
-        stdscr.addstr(27, 2, "[ COMMANDS ]")
+        safe(27, 2, "[ COMMANDS ]")
         stdscr.attroff(curses.color_pair(3) | curses.A_BOLD)
 
         cmds = [
@@ -236,7 +243,7 @@ class JetsonAIDashboard:
             "[o] Gửi IR ON    [f] Gửi IR OFF   [i] Nhận dạng IR    [q] Thoát",
         ]
         for i, cmd in enumerate(cmds):
-            stdscr.addstr(28 + i, 4, cmd[:W - 5])
+            safe(28 + i, 4, cmd)
 
         stdscr.refresh()
 
