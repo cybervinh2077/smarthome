@@ -48,14 +48,14 @@ class JetsonAIDashboard:
         self.ir_on_code     = None        # Mã lệnh ON đã học
         self.ir_off_code    = None        # Mã lệnh OFF đã học
         self.ir_setup_mode  = None        # "waiting_on" | "waiting_off" | None
+        self.ai_history     = []
         self.lock           = threading.Lock()
 
-        self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-        self.client.on_connect = self._on_connect
-        self.client.on_message = self._on_message
+        # Callback gán trong run() để đảm bảo thứ tự đúng
+        self.client = mqtt.Client(client_id="JetsonDashboard", clean_session=True)
 
     # ── MQTT ─────────────────────────────────────────────────────────────────
-    def _on_connect(self, client, userdata, flags, rc):
+    def _on_connect(self, client, userdata, flags, rc, properties=None):
         if rc == 0:
             client.subscribe(f"{ROOM_TOPIC}/sensor/+")
             client.subscribe(f"{ROOM_TOPIC}/ac/status")
@@ -65,20 +65,27 @@ class JetsonAIDashboard:
 
     def _on_message(self, client, userdata, msg):
         topic   = msg.topic
-        payload = msg.payload.decode()
+        payload = msg.payload.decode().strip()
         with self.lock:
-            if "temp"        in topic: self.temp      = float(payload)
-            elif "hum"       in topic: self.hum        = float(payload)
-            elif "motion"    in topic: self.motion     = "ON" if payload == "1" else "OFF"
-            elif "ac/status" in topic: self.ac_status  = payload.upper()
-            elif "ir/received" in topic:
-                self.last_ir = payload.strip()
-                if self.ir_setup_mode == "waiting_on":
-                    self.ir_on_code    = payload.strip()
-                    self.ir_setup_mode = "waiting_off"
-                elif self.ir_setup_mode == "waiting_off":
-                    self.ir_off_code   = payload.strip()
-                    self.ir_setup_mode = None
+            try:
+                if "temp" in topic:
+                    self.temp = float(payload)
+                elif "hum" in topic:
+                    self.hum = float(payload)
+                elif "motion" in topic:
+                    self.motion = "ON" if payload == "1" else "OFF"
+                elif "ac/status" in topic:
+                    self.ac_status = payload.upper()
+                elif "ir/received" in topic:
+                    self.last_ir = payload
+                    if self.ir_setup_mode == "waiting_on":
+                        self.ir_on_code    = payload
+                        self.ir_setup_mode = "waiting_off"
+                    elif self.ir_setup_mode == "waiting_off":
+                        self.ir_off_code   = payload
+                        self.ir_setup_mode = None
+            except ValueError:
+                pass
 
     # ── AI ───────────────────────────────────────────────────────────────────
     def ai_query(self, user_query: str) -> str:
@@ -148,7 +155,14 @@ class JetsonAIDashboard:
         stdscr.attroff(curses.color_pair(2))
 
         with self.lock:
-            t, h, m, ac = self.temp, self.hum, self.motion, self.ac_status
+            t      = self.temp
+            h      = self.hum
+            m      = self.motion
+            ac     = self.ac_status
+            ir     = self.last_ir
+            ir_on  = self.ir_on_code
+            ir_off = self.ir_off_code
+            ir_mode = self.ir_setup_mode
 
         safe(5, 4, f"Temperature : {t:.1f} C")
         safe(6, 4, f"Humidity    : {h:.0f} %")
@@ -162,7 +176,7 @@ class JetsonAIDashboard:
         stdscr.attroff(curses.color_pair(2) if ac == "ON" else curses.color_pair(3))
 
         stdscr.attron(curses.color_pair(3))
-        safe(9, 4, f"IR RX       : {self.last_ir}")
+        safe(9, 4, f"IR RX       : {ir}")
         stdscr.attroff(curses.color_pair(3))
 
         # IR Setup section
@@ -170,11 +184,6 @@ class JetsonAIDashboard:
         stdscr.attron(curses.color_pair(2) | curses.A_BOLD)
         safe(12, 2, "[ IR SETUP ]")
         stdscr.attroff(curses.color_pair(2) | curses.A_BOLD)
-
-        with self.lock:
-            ir_on   = self.ir_on_code
-            ir_off  = self.ir_off_code
-            ir_mode = self.ir_setup_mode
 
         # ON Code
         if ir_on:
@@ -263,6 +272,7 @@ class JetsonAIDashboard:
 
     def _run_tui(self, stdscr):
         stdscr.nodelay(True)
+        stdscr.timeout(100)   # refresh mỗi 100ms dù không có keypress
         ai_reply  = ""
         ai_thread = None
 
@@ -332,10 +342,10 @@ class JetsonAIDashboard:
                     self.client.publish(f"{ROOM_TOPIC}/ir/send", code)
                     ai_reply = f"[IR SENT] {code} → ESP32"
 
-            time.sleep(0.1)
-
     # ── Entry ─────────────────────────────────────────────────────────────────
     def run(self):
+        self.client.on_connect = self._on_connect
+        self.client.on_message = self._on_message
         self.client.connect(MQTT_BROKER, MQTT_PORT, 60)
         threading.Thread(target=self.client.loop_forever, daemon=True).start()
         curses.wrapper(self._run_tui)
