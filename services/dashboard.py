@@ -28,6 +28,11 @@ SYSTEM_PROMPT = """Bạn là trợ lý AI nhà thông minh. Nhiệm vụ:
 3. Nếu người dùng ra lệnh (bật/tắt/timer điều hòa), trả về JSON:
    {{"action": "bat_ac|tat_ac|timer_ac", "temp": 26, "duration": 60}}
    kèm giải thích ngắn.
+4. IR ON code  : {ir_on}
+   IR OFF code : {ir_off}
+   IR vừa nhận : {ir_code}
+   - Nếu nhận mã IR remote điều hòa, đối chiếu ON/OFF code đã học để xác nhận lệnh.
+   - Các mã NEC thông dụng: Power=0x20DF10EF, Cool=0x20DF906F
 
 Dữ liệu hiện tại: Nhiệt={temp}C, Độ ẩm={hum}%, Motion={motion}, AC={ac}"""
 
@@ -35,11 +40,15 @@ Dữ liệu hiện tại: Nhiệt={temp}C, Độ ẩm={hum}%, Motion={motion}, A
 # ── Dashboard Class ───────────────────────────────────────────────────────────
 class JetsonAIDashboard:
     def __init__(self):
-        self.temp      = 0.0
-        self.hum       = 0.0
-        self.motion    = "OFF"
-        self.ac_status = "OFF"
-        self.lock      = threading.Lock()
+        self.temp           = 0.0
+        self.hum            = 0.0
+        self.motion         = "OFF"
+        self.ac_status      = "OFF"
+        self.last_ir        = "Chưa có"
+        self.ir_on_code     = None        # Mã lệnh ON đã học
+        self.ir_off_code    = None        # Mã lệnh OFF đã học
+        self.ir_setup_mode  = None        # "waiting_on" | "waiting_off" | None
+        self.lock           = threading.Lock()
 
         self.client = mqtt.Client()
         self.client.on_connect = self._on_connect
@@ -50,6 +59,7 @@ class JetsonAIDashboard:
         if rc == 0:
             client.subscribe(f"{ROOM_TOPIC}/sensor/+")
             client.subscribe(f"{ROOM_TOPIC}/ac/status")
+            client.subscribe(f"{ROOM_TOPIC}/ir/received")
         else:
             print(f"[MQTT] Connect failed, rc={rc}")
 
@@ -57,17 +67,28 @@ class JetsonAIDashboard:
         topic   = msg.topic
         payload = msg.payload.decode()
         with self.lock:
-            if "temp"     in topic: self.temp      = float(payload)
-            elif "hum"    in topic: self.hum        = float(payload)
-            elif "motion" in topic: self.motion     = "ON" if payload == "1" else "OFF"
-            elif "ac/status" in topic: self.ac_status = payload.upper()
+            if "temp"        in topic: self.temp      = float(payload)
+            elif "hum"       in topic: self.hum        = float(payload)
+            elif "motion"    in topic: self.motion     = "ON" if payload == "1" else "OFF"
+            elif "ac/status" in topic: self.ac_status  = payload.upper()
+            elif "ir/received" in topic:
+                self.last_ir = payload.strip()
+                if self.ir_setup_mode == "waiting_on":
+                    self.ir_on_code    = payload.strip()
+                    self.ir_setup_mode = "waiting_off"
+                elif self.ir_setup_mode == "waiting_off":
+                    self.ir_off_code   = payload.strip()
+                    self.ir_setup_mode = None
 
     # ── AI ───────────────────────────────────────────────────────────────────
     def ai_query(self, user_query: str) -> str:
         with self.lock:
             sys_prompt = SYSTEM_PROMPT.format(
                 temp=self.temp, hum=self.hum,
-                motion=self.motion, ac=self.ac_status
+                motion=self.motion, ac=self.ac_status,
+                ir_on=self.ir_on_code   or "Chưa học",
+                ir_off=self.ir_off_code or "Chưa học",
+                ir_code=self.last_ir,
             )
         try:
             resp  = ollama.chat(
@@ -133,10 +154,64 @@ class JetsonAIDashboard:
         stdscr.addstr(8, 4, f"AC Status   : {ac}")
         stdscr.attroff(curses.color_pair(2) if ac == "ON" else curses.color_pair(3))
 
+        stdscr.attron(curses.color_pair(3))
+        stdscr.addstr(9, 4, f"IR RX       : {self.last_ir}")
+        stdscr.attroff(curses.color_pair(3))
+
+        # IR Setup section
+        stdscr.addstr(11, 0, "-" * (W - 1))
+        stdscr.attron(curses.color_pair(2) | curses.A_BOLD)
+        stdscr.addstr(12, 2, "[ IR SETUP ]")
+        stdscr.attroff(curses.color_pair(2) | curses.A_BOLD)
+
+        with self.lock:
+            ir_on   = self.ir_on_code
+            ir_off  = self.ir_off_code
+            ir_mode = self.ir_setup_mode
+
+        # ON Code
+        if ir_on:
+            stdscr.attron(curses.color_pair(1))
+            stdscr.addstr(13, 4, f"ON Code  : {ir_on} (đã học)")
+            stdscr.attroff(curses.color_pair(1))
+        else:
+            stdscr.attron(curses.color_pair(3))
+            stdscr.addstr(13, 4, "ON Code  : Chưa học")
+            stdscr.attroff(curses.color_pair(3))
+
+        # OFF Code
+        if ir_off:
+            stdscr.attron(curses.color_pair(1))
+            stdscr.addstr(14, 4, f"OFF Code : {ir_off} (đã học)")
+            stdscr.attroff(curses.color_pair(1))
+        else:
+            stdscr.attron(curses.color_pair(5))
+            stdscr.addstr(14, 4, "OFF Code : Chưa học")
+            stdscr.attroff(curses.color_pair(5))
+
+        # Mode status (nhấp nháy khi đang chờ)
+        blink = int(time.time()) % 2 == 0
+        if ir_mode == "waiting_on":
+            mode_str = "Hãy bấm nút ON trên remote..." if blink else ">>> CHỜ MÃ ON <<<   "
+            stdscr.attron(curses.color_pair(2) | curses.A_BOLD)
+            stdscr.addstr(15, 4, f"Mode     : {mode_str}")
+            stdscr.attroff(curses.color_pair(2) | curses.A_BOLD)
+        elif ir_mode == "waiting_off":
+            mode_str = "ON đã lưu! Hãy bấm nút OFF trên remote..." if blink else ">>> CHỜ MÃ OFF <<<  "
+            stdscr.attron(curses.color_pair(2) | curses.A_BOLD)
+            stdscr.addstr(15, 4, f"Mode     : {mode_str}")
+            stdscr.attroff(curses.color_pair(2) | curses.A_BOLD)
+        elif ir_on and ir_off:
+            stdscr.attron(curses.color_pair(1))
+            stdscr.addstr(15, 4, f"Mode     : Setup hoàn tất!")
+            stdscr.attroff(curses.color_pair(1))
+        else:
+            stdscr.addstr(15, 4, "Mode     : Nhấn [r] để setup remote")
+
         # AI response
-        stdscr.addstr(10, 0, "-" * (W - 1))
+        stdscr.addstr(17, 0, "-" * (W - 1))
         stdscr.attron(curses.color_pair(4) | curses.A_BOLD)
-        stdscr.addstr(11, 2, "[ AI RESPONSE ]")
+        stdscr.addstr(18, 2, "[ AI RESPONSE ]")
         stdscr.attroff(curses.color_pair(4) | curses.A_BOLD)
 
         max_len = W - 6
@@ -147,27 +222,37 @@ class JetsonAIDashboard:
                 chunk = chunk[max_len:]
             lines.append(chunk)
         for i, line in enumerate(lines[:6]):
-            stdscr.addstr(12 + i, 4, line[:W - 5])
+            stdscr.addstr(19 + i, 4, line[:W - 5])
 
         # Commands
-        stdscr.addstr(19, 0, "-" * (W - 1))
+        stdscr.addstr(26, 0, "-" * (W - 1))
         stdscr.attron(curses.color_pair(3) | curses.A_BOLD)
-        stdscr.addstr(20, 2, "[ COMMANDS ]")
+        stdscr.addstr(27, 2, "[ COMMANDS ]")
         stdscr.attroff(curses.color_pair(3) | curses.A_BOLD)
 
         cmds = [
-            "[t] Nhiệt độ phòng?",
-            "[h] Độ ẩm OK không?",
-            "[a] Tình trạng AC?",
-            "[c] Tư vấn bật/tắt AC?",
-            "[b] Bật điều hòa 26°C",
-            "[x] Tắt điều hòa",
-            "[q] Thoát",
+            "[t] Nhiệt độ?    [h] Độ ẩm?      [a] Tình trạng AC?  [c] Tư vấn AC?",
+            "[b] Bật AC       [x] Tắt AC       [r] Setup IR remote",
+            "[o] Gửi IR ON    [f] Gửi IR OFF   [i] Nhận dạng IR    [q] Thoát",
         ]
         for i, cmd in enumerate(cmds):
-            stdscr.addstr(21 + i, 4, cmd)
+            stdscr.addstr(28 + i, 4, cmd[:W - 5])
 
         stdscr.refresh()
+
+    def _input_ir_code(self, stdscr) -> str:
+        """Hiển thị prompt nhập hex IR code, trả về string nhập vào."""
+        H, W = stdscr.getmaxyx()
+        prompt = "Nhập mã IR hex (vd: 0x20DF10EF): "
+        stdscr.addstr(H - 2, 0, " " * (W - 1))
+        stdscr.addstr(H - 2, 2, prompt)
+        stdscr.refresh()
+        curses.echo()
+        curses.curs_set(1)
+        code = stdscr.getstr(H - 2, 2 + len(prompt), 20).decode().strip()
+        curses.noecho()
+        curses.curs_set(0)
+        return code
 
     def _run_tui(self, stdscr):
         stdscr.nodelay(True)
@@ -200,6 +285,45 @@ class JetsonAIDashboard:
                     target=ask, args=(KEY_MAP[key],), daemon=True
                 )
                 ai_thread.start()
+            elif key == ord('i') and not busy:
+                with self.lock:
+                    ir = self.last_ir
+                ai_thread = threading.Thread(
+                    target=ask,
+                    args=(f"Mã IR vừa nhận được là {ir}, đây là lệnh gì của remote?",),
+                    daemon=True,
+                )
+                ai_thread.start()
+            elif key == ord('r'):
+                with self.lock:
+                    self.ir_on_code    = None
+                    self.ir_off_code   = None
+                    self.ir_setup_mode = "waiting_on"
+                self.client.publish(f"{ROOM_TOPIC}/ir/listen", "1")
+                ai_reply = "[IR SETUP] Bắt đầu học remote. Bấm nút ON..."
+            elif key == ord('o'):
+                with self.lock:
+                    code = self.ir_on_code
+                if code:
+                    self.client.publish(f"{ROOM_TOPIC}/ir/send", code)
+                    ai_reply = f"[IR ON SENT] {code} → ESP32"
+                else:
+                    ai_reply = "[IR] Chưa có mã ON. Nhấn [r] để setup."
+            elif key == ord('f'):
+                with self.lock:
+                    code = self.ir_off_code
+                if code:
+                    self.client.publish(f"{ROOM_TOPIC}/ir/send", code)
+                    ai_reply = f"[IR OFF SENT] {code} → ESP32"
+                else:
+                    ai_reply = "[IR] Chưa có mã OFF. Nhấn [r] để setup."
+            elif key == ord('s'):
+                stdscr.nodelay(False)
+                code = self._input_ir_code(stdscr)
+                stdscr.nodelay(True)
+                if code:
+                    self.client.publish(f"{ROOM_TOPIC}/ir/send", code)
+                    ai_reply = f"[IR SENT] {code} → ESP32"
 
             time.sleep(0.1)
 
